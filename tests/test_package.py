@@ -4,6 +4,10 @@ from uuid import UUID
 
 from recoveriq.domain.customer import Customer, CustomerStatus
 from recoveriq.domain.payment import Payment, PaymentStatus
+from recoveriq.domain.payment_failure import (
+    PaymentFailure,
+    PaymentFailureCategory,
+)
 from recoveriq.domain.subscription import Subscription, SubscriptionStatus
 
 
@@ -148,3 +152,82 @@ def test_payment_normalizes_currency():
     )
 
     assert payment.currency == "USD"
+
+
+def test_payment_failure_create_generates_valid_failure():
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("499.00"),
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("499.00"),
+        status=PaymentStatus.FAILED,
+    )
+
+    occurred_at = datetime(2026, 8, 26, 13, 5, tzinfo=timezone.utc)
+
+    failure = PaymentFailure.create(
+        payment_id=payment.id,
+        category=PaymentFailureCategory.TRANSIENT,
+        code="timeout",
+        occurred_at=occurred_at,
+    )
+
+    assert isinstance(failure.id, UUID)
+    assert failure.payment_id == payment.id
+    assert failure.occurred_at == occurred_at
+    assert failure.category is PaymentFailureCategory.TRANSIENT
+    assert failure.code == "timeout"
+
+
+def test_payment_failure_normalizes_code():
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("499.00"),
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("499.00"),
+        status=PaymentStatus.FAILED,
+    )
+
+    failure = PaymentFailure.create(
+        payment_id=payment.id,
+        category=PaymentFailureCategory.PAYMENT_METHOD,
+        code="  card_declined  ",
+    )
+
+    assert failure.code == "card_declined"
+
+
+def test_payment_failure_rejects_empty_code():
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("499.00"),
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("499.00"),
+        status=PaymentStatus.FAILED,
+    )
+
+    try:
+        PaymentFailure.create(
+            payment_id=payment.id,
+            category=PaymentFailureCategory.UNKNOWN,
+            code="   ",
+        )
+    except ValueError as exc:
+        assert str(exc) == "Payment failure code must not be empty."
+    else:
+        raise AssertionError("Expected ValueError for an empty failure code.")
