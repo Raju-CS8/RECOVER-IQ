@@ -1,3 +1,4 @@
+from recoveriq.cli import main
 from recoveriq.ai_config import AIProviderConfig
 from recoveriq.recovery_prediction_parser import RecoveryPredictionParser
 from recoveriq.model_provider_factory import RecoveryModelProviderFactory
@@ -22,6 +23,9 @@ from recoveriq.domain.batch_recovery_evaluation import (
 from recoveriq.application.recovery_workflow import (
     RecoveryWorkflow,
     RecoveryWorkflowResult,
+)
+from recoveriq.application.recovery_workflow_factory import (
+    RecoveryWorkflowFactory,
 )
 from recoveriq.domain.batch_recovery_runner import (
     BatchRecoveryResult,
@@ -4400,3 +4404,256 @@ def test_recovery_workflow_executes_complete_recovery_process():
     assert result.episode.recovered_amount == Decimal("500.00")
     assert result.evaluation.recovered is True
     assert result.evaluation.net_recovery_value == Decimal("495.00")
+def test_recovery_workflow_factory_creates_workflow():
+    config = AIProviderConfig(
+        provider="deterministic",
+        api_key=None,
+        model="local",
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        retry_success_probability=Decimal("1.0"),
+        payment_method_update_success_probability=Decimal("1.0"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    workflow = RecoveryWorkflowFactory.create(
+        config=config,
+        scenario=scenario,
+        simulator_seed=42,
+        maximum_steps=3,
+    )
+
+    assert isinstance(workflow, RecoveryWorkflow)
+def test_recovery_workflow_factory_runs_complete_recovery_workflow():
+    config = AIProviderConfig(
+        provider="deterministic",
+        api_key=None,
+        model="local",
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        retry_success_probability=Decimal("1.0"),
+        payment_method_update_success_probability=Decimal("1.0"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    failure = PaymentFailure.create(
+        payment_id=payment.id,
+        category=PaymentFailureCategory.TRANSIENT,
+        code="temporary_failure",
+    )
+
+    workflow = RecoveryWorkflowFactory.create(
+        config=config,
+        scenario=scenario,
+        simulator_seed=42,
+        maximum_steps=3,
+    )
+
+    result = workflow.run(
+        customer=customer,
+        subscription=subscription,
+        payment=payment,
+        failure=failure,
+        scenario=scenario,
+    )
+
+    assert isinstance(result, RecoveryWorkflowResult)
+    assert result.episode.recovered is True
+    assert result.episode.recovered_amount == Decimal("500.00")
+    assert result.evaluation.recovered is True
+    assert result.evaluation.net_recovery_value == Decimal("495.00")
+    
+def test_cli_main_runs_complete_recovery(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "AI_PROVIDER",
+        "deterministic",
+    )
+    monkeypatch.setenv(
+        "AI_MODEL",
+        "local",
+    )
+
+    main()
+
+    captured = capsys.readouterr()
+
+    assert "RecoverIQ Recovery Result" in captured.out
+    assert "Recovered: True" in captured.out
+    assert "Recovered amount: 500.00" in captured.out
+    assert "Total recovery cost: 5.00" in captured.out
+    assert "Net recovery value: 495.00" in captured.out
+    assert "Decision count: 1" in captured.out
+    assert "Terminal: True" in captured.out
+    
+def test_cli_main_runs_with_custom_amount(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv(
+        "AI_PROVIDER",
+        "deterministic",
+    )
+    monkeypatch.setenv(
+        "AI_MODEL",
+        "local",
+    )
+
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "recoveriq.cli",
+            "--amount",
+            "1000",
+        ],
+    )
+
+    from recoveriq.cli import main
+
+    main()
+
+    captured = capsys.readouterr()
+
+    assert "Payment amount: 1000" in captured.out
+    assert "Recovered amount: 1000" in captured.out
+    assert "Net recovery value: 995.00" in captured.out
+
+def test_cli_main_runs_with_custom_maximum_steps(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv(
+        "AI_PROVIDER",
+        "deterministic",
+    )
+    monkeypatch.setenv(
+        "AI_MODEL",
+        "local",
+    )
+
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "recoveriq.cli",
+            "--maximum-steps",
+            "5",
+        ],
+    )
+
+    from recoveriq.cli import main
+
+    main()
+
+    captured = capsys.readouterr()
+
+    assert "Maximum steps: 5" in captured.out
+    assert "Recovered: True" in captured.out
+    assert "Terminal: True" in captured.out
+    
+def test_cli_main_runs_with_custom_simulator_seed(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv(
+        "AI_PROVIDER",
+        "deterministic",
+    )
+    monkeypatch.setenv(
+        "AI_MODEL",
+        "local",
+    )
+
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "recoveriq.cli",
+            "--simulator-seed",
+            "99",
+        ],
+    )
+
+    from recoveriq.cli import main
+
+    main()
+
+    captured = capsys.readouterr()
+
+    assert "Simulator seed: 99" in captured.out
+    assert "Recovered: True" in captured.out
+    assert "Terminal: True" in captured.out
+    
+def test_cli_main_runs_with_custom_retry_success_probability(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv(
+        "AI_PROVIDER",
+        "deterministic",
+    )
+    monkeypatch.setenv(
+        "AI_MODEL",
+        "local",
+    )
+
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "recoveriq.cli",
+            "--retry-success-probability",
+            "0.5",
+            "--simulator-seed",
+            "42",
+        ],
+    )
+
+    from recoveriq.cli import main
+
+    main()
+
+    captured = capsys.readouterr()
+
+    assert "Retry success probability: 0.5" in captured.out
+    assert "Simulator seed: 42" in captured.out
+    assert "Recovered: False" in captured.out
+    assert "Terminal: True" in captured.out
