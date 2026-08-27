@@ -5,7 +5,10 @@ from decimal import Decimal
 
 from recoveriq.domain.payment import PaymentStatus
 from recoveriq.domain.recovery_action import RecoveryAction
-from recoveriq.domain.recovery_engine import RecoveryDecision, RecoveryEngine
+from recoveriq.domain.recovery_engine import (
+    RecoveryDecision,
+    RecoveryEngine,
+)
 from recoveriq.domain.recovery_state import RecoveryState
 
 
