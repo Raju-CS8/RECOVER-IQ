@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from recoveriq.ai_config import AIProviderConfig
-from recoveriq.deterministic_model_provider import DeterministicModelProvider
-from recoveriq.domain.recovery_model_provider import RecoveryModelProvider
+from recoveriq.deterministic_model_provider import (
+    DeterministicModelProvider,
+)
+from recoveriq.domain.recovery_model_provider import (
+    RecoveryModelProvider,
+)
 
 
 class RecoveryModelProviderFactory:

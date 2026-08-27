@@ -9,10 +9,36 @@ from recoveriq.domain.recovery_features import RecoveryFeatureVector
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
+from recoveriq.recovery_state_factory import RecoveryStateFactory
 
 from recoveriq.domain.recovery_evaluation import (
     RecoveryEvaluation,
     RecoveryEvaluator,
+)
+from recoveriq.domain.batch_recovery_evaluation import (
+    BatchRecoveryEvaluation,
+    BatchRecoveryEvaluator,
+)
+from recoveriq.application.recovery_workflow import (
+    RecoveryWorkflow,
+    RecoveryWorkflowResult,
+)
+from recoveriq.domain.batch_recovery_runner import (
+    BatchRecoveryResult,
+    BatchRecoveryRunner,
+)
+from recoveriq.domain.batch_recovery_workflow import (
+    BatchRecoveryInput,
+    BatchRecoveryWorkflow,
+    BatchRecoveryWorkflowResult,
+)
+from recoveriq.domain.batch_recovery_runner import (
+    BatchRecoveryResult,
+    BatchRecoveryRunner,
+)
+from recoveriq.domain.batch_recovery_evaluation import (
+    BatchRecoveryEvaluation,
+    BatchRecoveryEvaluator,
 )
 from recoveriq.domain.recovery_policy_metadata import (
     RecoveryPolicyMetadata,
@@ -3633,12 +3659,17 @@ def test_ai_provider_config_reads_environment(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER", "ollama")
     monkeypatch.setenv("AI_API_KEY", "test-key")
     monkeypatch.setenv("AI_MODEL", "llama3")
+    monkeypatch.setenv(
+        "AI_BASE_URL",
+        "http://localhost:11434",
+    )
 
     config = AIProviderConfig.from_environment()
 
     assert config.provider == "ollama"
     assert config.api_key == "test-key"
     assert config.model == "llama3"
+    assert config.base_url == "http://localhost:11434"
 
 
 def test_ai_provider_config_allows_missing_api_key(monkeypatch):
@@ -3992,3 +4023,380 @@ def test_recovery_prediction_parser_rejects_non_numeric_confidence():
         raise AssertionError(
             "Expected ValueError for invalid confidence."
         )
+def test_ai_provider_config_allows_missing_base_url(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "ollama")
+    monkeypatch.setenv("AI_MODEL", "llama3")
+    monkeypatch.delenv("AI_BASE_URL", raising=False)
+
+    config = AIProviderConfig.from_environment()
+
+    assert config.base_url is None
+def test_ai_provider_config_allows_missing_base_url(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "ollama")
+    monkeypatch.setenv("AI_MODEL", "llama3")
+    monkeypatch.delenv("AI_BASE_URL", raising=False)
+
+    config = AIProviderConfig.from_environment()
+
+    assert config.base_url is None
+def test_batch_recovery_evaluation_aggregates_metrics():
+    evaluations = (
+        RecoveryEvaluation(
+            recovered=True,
+            recovered_amount=Decimal("1000.00"),
+            total_recovery_cost=Decimal("10.00"),
+            customer_contact_cost=Decimal("5.00"),
+            total_economic_cost=Decimal("15.00"),
+            net_recovery_value=Decimal("985.00"),
+            decision_count=2,
+            customer_contact_count=1,
+            terminal=True,
+            policy_metadata=None,
+        ),
+        RecoveryEvaluation(
+            recovered=False,
+            recovered_amount=Decimal("0.00"),
+            total_recovery_cost=Decimal("20.00"),
+            customer_contact_cost=Decimal("5.00"),
+            total_economic_cost=Decimal("25.00"),
+            net_recovery_value=Decimal("-25.00"),
+            decision_count=3,
+            customer_contact_count=1,
+            terminal=True,
+            policy_metadata=None,
+        ),
+    )
+
+    evaluation = BatchRecoveryEvaluator().evaluate(
+        evaluations=evaluations,
+    )
+
+    assert isinstance(evaluation, BatchRecoveryEvaluation)
+    assert evaluation.evaluation_count == 2
+    assert evaluation.recovered_count == 1
+    assert evaluation.recovered_amount == Decimal("1000.00")
+    assert evaluation.total_recovery_cost == Decimal("30.00")
+    assert evaluation.customer_contact_cost == Decimal("10.00")
+    assert evaluation.total_economic_cost == Decimal("40.00")
+    assert evaluation.net_recovery_value == Decimal("960.00")
+    assert evaluation.recovery_rate == Decimal("0.5")
+def test_batch_recovery_evaluation_handles_empty_batch():
+    evaluation = BatchRecoveryEvaluator().evaluate(
+        evaluations=(),
+    )
+
+    assert evaluation.evaluation_count == 0
+    assert evaluation.recovered_count == 0
+    assert evaluation.recovered_amount == Decimal("0")
+    assert evaluation.total_recovery_cost == Decimal("0")
+    assert evaluation.customer_contact_cost == Decimal("0")
+    assert evaluation.total_economic_cost == Decimal("0")
+    assert evaluation.net_recovery_value == Decimal("0")
+    assert evaluation.recovery_rate == Decimal("0")
+def test_batch_recovery_runner_runs_episode_for_each_state():
+    class RecordingEpisode:
+        def __init__(self):
+            self.states: list[RecoveryState] = []
+
+        def run(
+            self,
+            *,
+            initial_state: RecoveryState,
+        ) -> RecoveryEpisodeResult:
+            self.states.append(initial_state)
+
+            return RecoveryEpisodeResult(
+                initial_state=initial_state,
+                final_state=initial_state,
+                decisions=(),
+                recovered=False,
+                recovered_amount=Decimal("0"),
+                total_recovery_cost=Decimal("0"),
+                terminal=False,
+            )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        failure_code="timeout",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+        ),
+    )
+
+    episode = RecordingEpisode()
+
+    runner = BatchRecoveryRunner(
+        episode=episode,
+    )
+
+    result = runner.run(
+        initial_states=(state, state),
+    )
+
+    assert isinstance(result, BatchRecoveryResult)
+    assert result.episode_count == 2
+    assert len(result.episodes) == 2
+    assert episode.states == [state, state]
+def test_batch_recovery_workflow_processes_each_input():
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        failure_code="timeout",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+        ),
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        retry_success_probability=Decimal("1.0"),
+        payment_method_update_success_probability=Decimal("0.0"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    class SuccessfulEpisode:
+        def run(
+            self,
+            *,
+            initial_state: RecoveryState,
+        ) -> RecoveryEpisodeResult:
+            outcome = RecoveryOutcome(
+                action=RecoveryAction.RETRY_PAYMENT,
+                payment_status=PaymentStatus.SUCCEEDED,
+                recovered=True,
+                recovered_amount=initial_state.amount,
+                recovery_cost=Decimal("5.00"),
+                customer_contacted=False,
+                terminal=True,
+            )
+
+            decision = RecoveryDecision(
+                action=RecoveryAction.RETRY_PAYMENT,
+                outcome=outcome,
+            )
+
+            return RecoveryEpisodeResult(
+                initial_state=initial_state,
+                final_state=initial_state,
+                decisions=(decision,),
+                recovered=True,
+                recovered_amount=initial_state.amount,
+                total_recovery_cost=Decimal("5.00"),
+                terminal=True,
+            )
+
+    workflow = BatchRecoveryWorkflow(
+        episode=SuccessfulEpisode(),
+        evaluator=RecoveryEvaluator(),
+        batch_evaluator=BatchRecoveryEvaluator(),
+    )
+
+    result = workflow.run(
+        inputs=(
+            BatchRecoveryInput(
+                state=state,
+                scenario=scenario,
+            ),
+            BatchRecoveryInput(
+                state=state,
+                scenario=scenario,
+            ),
+        ),
+    )
+
+    assert isinstance(result, BatchRecoveryWorkflowResult)
+    assert len(result.episode_results) == 2
+    assert len(result.evaluations) == 2
+
+    assert isinstance(
+        result.batch_evaluation,
+        BatchRecoveryEvaluation,
+    )
+
+    assert result.batch_evaluation.evaluation_count == 2
+    assert result.batch_evaluation.recovered_count == 2
+    assert result.batch_evaluation.recovered_amount == Decimal("1000.00")
+    assert result.batch_evaluation.net_recovery_value == Decimal("990.00")
+def test_recovery_state_factory_builds_state_from_domain_objects():
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    failure = PaymentFailure.create(
+        payment_id=payment.id,
+        category=PaymentFailureCategory.TRANSIENT,
+        code="timeout",
+    )
+
+    state = RecoveryStateFactory.create(
+        customer=customer,
+        subscription=subscription,
+        payment=payment,
+        failure=failure,
+    )
+
+    assert state.customer_id == customer.id
+    assert state.subscription_id == subscription.id
+    assert state.payment_id == payment.id
+
+    assert state.subscription_status is subscription.status
+    assert state.payment_status is payment.status
+
+    assert state.amount == payment.amount
+    assert state.currency == payment.currency
+    assert state.payment_attempted_at == payment.attempted_at
+
+    assert (
+        state.failure_category
+        is PaymentFailureCategory.TRANSIENT
+    )
+    assert state.failure_code == "timeout"
+
+    assert state.recovery_attempt_count == 0
+    assert state.previous_actions == ()
+
+    assert state.available_actions == (
+        RecoveryAction.RETRY_PAYMENT,
+        RecoveryAction.WAIT,
+        RecoveryAction.STOP_RECOVERY,
+    )
+def test_recovery_workflow_executes_complete_recovery_process():
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    failure = PaymentFailure.create(
+        payment_id=payment.id,
+        category=PaymentFailureCategory.TRANSIENT,
+        code="timeout",
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        retry_success_probability=Decimal("1.0"),
+        payment_method_update_success_probability=Decimal("0.0"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    simulator = RecoverySimulator(
+        seed=42,
+    )
+
+    environment = RecoveryEnvironment(
+        scenario=scenario,
+        simulator=simulator,
+    )
+
+    class RetryPolicy:
+        def predict(
+            self,
+            *,
+            state: RecoveryState,
+        ) -> RecoveryPrediction:
+            return RecoveryPrediction(
+                action=RecoveryAction.RETRY_PAYMENT,
+            )
+
+    engine = RecoveryEngine(
+        policy=RetryPolicy(),
+        environment=environment,
+    )
+
+    episode = RecoveryEpisode(
+        engine=engine,
+        maximum_steps=3,
+    )
+
+    workflow = RecoveryWorkflow(
+        episode=episode,
+        evaluator=RecoveryEvaluator(),
+    )
+
+    result = workflow.run(
+        customer=customer,
+        subscription=subscription,
+        payment=payment,
+        failure=failure,
+        scenario=scenario,
+    )
+
+    assert isinstance(result, RecoveryWorkflowResult)
+    assert result.episode.recovered is True
+    assert result.episode.recovered_amount == Decimal("500.00")
+    assert result.evaluation.recovered is True
+    assert result.evaluation.net_recovery_value == Decimal("495.00")
