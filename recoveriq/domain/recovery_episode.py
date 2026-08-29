@@ -9,6 +9,7 @@ from recoveriq.domain.recovery_engine import (
     RecoveryDecision,
     RecoveryEngine,
 )
+from recoveriq.domain.recovery_scenario import RecoveryScenario
 from recoveriq.domain.recovery_state import RecoveryState
 
 
@@ -62,11 +63,15 @@ class RecoveryEpisode:
         *,
         engine: RecoveryEngine,
         maximum_steps: int,
+        scenario: RecoveryScenario | None = None,
     ) -> None:
         if maximum_steps <= 0:
-            raise ValueError("Maximum episode steps must be greater than zero.")
+            raise ValueError(
+                "Maximum episode steps must be greater than zero."
+            )
 
         self._engine = engine
+        self._scenario = scenario
         self._maximum_steps = maximum_steps
 
     def run(
@@ -111,8 +116,8 @@ class RecoveryEpisode:
             terminal=final_outcome.terminal,
         )
 
-    @staticmethod
     def _next_state(
+        self,
         *,
         state: RecoveryState,
         decision: RecoveryDecision,
@@ -126,16 +131,28 @@ class RecoveryEpisode:
 
         recovery_attempt_count = state.recovery_attempt_count
 
-        if decision.action in {
+        attempt_actions = {
             RecoveryAction.RETRY_PAYMENT,
             RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE,
-        }:
+        }
+
+        if decision.action in attempt_actions:
             recovery_attempt_count += 1
 
         if outcome.payment_status is PaymentStatus.SUCCEEDED:
             available_actions: tuple[RecoveryAction, ...] = ()
         elif outcome.terminal:
             available_actions = ()
+        elif (
+            self._scenario is not None
+            and recovery_attempt_count
+            >= self._scenario.maximum_recovery_attempts
+        ):
+            available_actions = tuple(
+                action
+                for action in state.available_actions
+                if action not in attempt_actions
+            )
         else:
             available_actions = tuple(
                 action

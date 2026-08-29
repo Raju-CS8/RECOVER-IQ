@@ -1,3 +1,4 @@
+import pytest
 from recoveriq.cli import main
 from recoveriq.ai_config import AIProviderConfig
 from recoveriq.recovery_prediction_parser import RecoveryPredictionParser
@@ -856,7 +857,7 @@ def test_recovery_environment_failed_retry_recovers_nothing():
 
     scenario = RecoveryScenario(
         failure_category=PaymentFailureCategory.TRANSIENT,
-        retry_success_probability=Decimal("0.0"),
+        retry_success_probability=Decimal("0.50"),
         payment_method_update_success_probability=Decimal("0.0"),
         retry_cost=Decimal("0.50"),
         payment_method_update_cost=Decimal("1.00"),
@@ -1185,9 +1186,15 @@ def test_recovery_engine_runs_policy_and_environment_together():
         maximum_recovery_attempts=3,
     )
 
-    policy = RecoveryDecisionPolicy(
-        scenario=scenario,
-    )
+    class RetryPaymentPolicy(RecoveryPolicy):
+        def choose_action(
+            self,
+            *,
+            state: RecoveryState,
+        ) -> RecoveryAction:
+            return RecoveryAction.RETRY_PAYMENT
+
+    policy = RetryPaymentPolicy()
 
     environment = RecoveryEnvironment(
         scenario=scenario,
@@ -4657,3 +4664,789 @@ def test_cli_main_runs_with_custom_retry_success_probability(
     assert "Simulator seed: 42" in captured.out
     assert "Recovered: False" in captured.out
     assert "Terminal: True" in captured.out
+def test_recovery_opportunity_calculates_expected_economic_values():
+    from recoveriq.domain.recovery_opportunity import (
+        RecoveryOpportunity,
+    )
+
+    opportunity = RecoveryOpportunity(
+        action=RecoveryAction.RETRY_PAYMENT,
+        expected_recovered_amount=Decimal("500.00"),
+        expected_recovery_cost=Decimal("5.00"),
+        expected_customer_contact_cost=Decimal("2.00"),
+    )
+
+    assert opportunity.expected_total_cost == Decimal("7.00")
+    assert opportunity.expected_net_value == Decimal("493.00")
+
+
+def test_recovery_opportunity_from_state_accepts_available_action():
+    from recoveriq.domain.recovery_opportunity import (
+        RecoveryOpportunity,
+    )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        failure_code="timeout",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+        ),
+    )
+
+    opportunity = RecoveryOpportunity.from_state(
+        state=state,
+        action=RecoveryAction.RETRY_PAYMENT,
+        expected_recovered_amount=Decimal("500.00"),
+        expected_recovery_cost=Decimal("5.00"),
+        expected_customer_contact_cost=Decimal("0"),
+    )
+
+    assert opportunity.action is RecoveryAction.RETRY_PAYMENT
+    assert opportunity.expected_net_value == Decimal("495.00")
+
+
+def test_recovery_opportunity_from_state_rejects_unavailable_action():
+    from recoveriq.domain.recovery_opportunity import (
+        RecoveryOpportunity,
+    )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        failure_code="timeout",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+        ),
+    )
+
+    with pytest.raises(ValueError):
+        RecoveryOpportunity.from_state(
+            state=state,
+            action=RecoveryAction.STOP_RECOVERY,
+            expected_recovered_amount=Decimal("0"),
+            expected_recovery_cost=Decimal("0"),
+            expected_customer_contact_cost=Decimal("0"),
+        )
+
+
+def test_recovery_opportunity_rejects_negative_values():
+    from recoveriq.domain.recovery_opportunity import (
+        RecoveryOpportunity,
+    )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        failure_code="timeout",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+        ),
+    )
+
+    with pytest.raises(ValueError):
+        RecoveryOpportunity.from_state(
+            state=state,
+            action=RecoveryAction.RETRY_PAYMENT,
+            expected_recovered_amount=Decimal("-1.00"),
+            expected_recovery_cost=Decimal("0"),
+            expected_customer_contact_cost=Decimal("0"),
+        )
+def test_recovery_decision_policy_includes_customer_contact_cost_in_payment_method_expected_value():
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        failure_code="payment_method_failure",
+        available_actions=(
+            RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE,
+        ),
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        retry_success_probability=Decimal("0.00"),
+        payment_method_update_success_probability=Decimal("0.80"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    policy = RecoveryDecisionPolicy(
+        scenario=scenario,
+    )
+
+    prediction = policy.predict(
+        state=state,
+    )
+
+    assert (
+        prediction.action
+        is RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE
+    )
+
+    assert prediction.expected_value == Decimal("388.00")
+def test_recovery_opportunity_evaluator_evaluates_retry_payment():
+    from recoveriq.domain.recovery_opportunity_evaluator import (
+        RecoveryOpportunityEvaluator,
+    )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        failure_code="timeout",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+        ),
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        retry_success_probability=Decimal("0.80"),
+        payment_method_update_success_probability=Decimal("0.00"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    evaluator = RecoveryOpportunityEvaluator(
+        scenario=scenario,
+    )
+
+    opportunity = evaluator.evaluate(
+        state=state,
+        action=RecoveryAction.RETRY_PAYMENT,
+    )
+
+    assert opportunity.expected_recovered_amount == Decimal("400.00")
+    assert opportunity.expected_recovery_cost == Decimal("5.00")
+    assert opportunity.expected_customer_contact_cost == Decimal("0")
+    assert opportunity.expected_total_cost == Decimal("5.00")
+    assert opportunity.expected_net_value == Decimal("395.00")
+
+
+def test_recovery_opportunity_evaluator_evaluates_payment_method_update():
+    from recoveriq.domain.recovery_opportunity_evaluator import (
+        RecoveryOpportunityEvaluator,
+    )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        failure_code="payment_method_failure",
+        available_actions=(
+            RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE,
+        ),
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        retry_success_probability=Decimal("0.00"),
+        payment_method_update_success_probability=Decimal("0.80"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    evaluator = RecoveryOpportunityEvaluator(
+        scenario=scenario,
+    )
+
+    opportunity = evaluator.evaluate(
+        state=state,
+        action=RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE,
+    )
+
+    assert opportunity.expected_recovered_amount == Decimal("400.00")
+    assert opportunity.expected_recovery_cost == Decimal("10.00")
+    assert opportunity.expected_customer_contact_cost == Decimal("2.00")
+    assert opportunity.expected_total_cost == Decimal("12.00")
+    assert opportunity.expected_net_value == Decimal("388.00")
+
+
+def test_recovery_opportunity_evaluator_evaluates_all_available_actions():
+    from recoveriq.domain.recovery_opportunity_evaluator import (
+        RecoveryOpportunityEvaluator,
+    )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        failure_code="payment_method_failure",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+            RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE,
+            RecoveryAction.WAIT,
+        ),
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        retry_success_probability=Decimal("0.50"),
+        payment_method_update_success_probability=Decimal("0.80"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    evaluator = RecoveryOpportunityEvaluator(
+        scenario=scenario,
+    )
+
+    opportunities = evaluator.evaluate_all(
+        state=state,
+    )
+
+    assert len(opportunities) == 3
+
+    assert opportunities[0].action is RecoveryAction.RETRY_PAYMENT
+    assert (
+        opportunities[1].action
+        is RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE
+    )
+    assert opportunities[2].action is RecoveryAction.WAIT
+
+    assert opportunities[0].expected_net_value == Decimal("245.00")
+    assert opportunities[1].expected_net_value == Decimal("388.00")
+    assert opportunities[2].expected_net_value == Decimal("0")
+def test_recovery_decision_policy_uses_opportunity_net_value():
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        failure_code="payment_method_failure",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+            RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE,
+        ),
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        retry_success_probability=Decimal("0.50"),
+        payment_method_update_success_probability=Decimal("0.80"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    policy = RecoveryDecisionPolicy(
+        scenario=scenario,
+    )
+
+    prediction = policy.predict(
+        state=state,
+    )
+
+    assert (
+        prediction.action
+        is RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE
+    )
+
+    assert prediction.expected_value == Decimal("388.00")
+def test_recovery_workflow_factory_rejects_non_positive_maximum_episode_steps():
+    from recoveriq.domain.recovery_workflow_factory import (
+        RecoveryWorkflowFactory,
+    )
+
+    with pytest.raises(ValueError):
+        RecoveryWorkflowFactory(
+            maximum_episode_steps=0,
+        )
+
+
+def test_recovery_workflow_factory_creates_working_recovery_episode():
+    from recoveriq.domain.recovery_workflow_factory import (
+        RecoveryWorkflowFactory,
+    )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        failure_code="timeout",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+        ),
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        retry_success_probability=Decimal("1.00"),
+        payment_method_update_success_probability=Decimal("0.00"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    factory = RecoveryWorkflowFactory(
+        maximum_episode_steps=3,
+    )
+
+    episode = factory.create_episode(
+        scenario=scenario,
+        simulator_seed=42,
+    )
+
+    result = episode.run(
+        initial_state=state,
+    )
+
+    assert result.recovered is True
+    assert result.recovered_amount == Decimal("500.00")
+    assert result.total_recovery_cost == Decimal("5.00")
+    assert result.terminal is True
+    assert result.decision_count == 1
+    assert (
+        result.decisions[0].action
+        is RecoveryAction.RETRY_PAYMENT
+    )
+def test_batch_recovery_workflow_uses_recovery_workflow_factory_per_input():
+    from recoveriq.domain.recovery_workflow_factory import (
+        RecoveryWorkflowFactory,
+    )
+
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+    )
+
+    first_payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    second_payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("500.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    first_state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=first_payment.id,
+        subscription_status=subscription.status,
+        payment_status=first_payment.status,
+        amount=first_payment.amount,
+        currency=first_payment.currency,
+        payment_attempted_at=first_payment.attempted_at,
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        failure_code="timeout",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+        ),
+    )
+
+    second_state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=second_payment.id,
+        subscription_status=subscription.status,
+        payment_status=second_payment.status,
+        amount=second_payment.amount,
+        currency=second_payment.currency,
+        payment_attempted_at=second_payment.attempted_at,
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        failure_code="payment_method_failure",
+        available_actions=(
+            RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE,
+        ),
+    )
+
+    first_scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        retry_success_probability=Decimal("1.00"),
+        payment_method_update_success_probability=Decimal("0.00"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    second_scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.PAYMENT_METHOD,
+        retry_success_probability=Decimal("0.00"),
+        payment_method_update_success_probability=Decimal("1.00"),
+        retry_cost=Decimal("5.00"),
+        payment_method_update_cost=Decimal("10.00"),
+        recovery_message_cost=Decimal("1.00"),
+        customer_contact_cost=Decimal("2.00"),
+        maximum_recovery_attempts=3,
+    )
+
+    workflow = BatchRecoveryWorkflow(
+        episode_factory=RecoveryWorkflowFactory(
+            maximum_episode_steps=3,
+        ),
+        evaluator=RecoveryEvaluator(),
+        batch_evaluator=BatchRecoveryEvaluator(),
+        simulator_seed=42,
+    )
+
+    result = workflow.run(
+        inputs=(
+            BatchRecoveryInput(
+                state=first_state,
+                scenario=first_scenario,
+            ),
+            BatchRecoveryInput(
+                state=second_state,
+                scenario=second_scenario,
+            ),
+        ),
+    )
+
+    assert len(result.episode_results) == 2
+
+    assert result.episode_results[0].recovered is True
+    assert (
+        result.episode_results[0].decisions[0].action
+        is RecoveryAction.RETRY_PAYMENT
+    )
+    assert (
+        result.episode_results[0].recovered_amount
+        == Decimal("500.00")
+    )
+    assert (
+        result.episode_results[0].total_recovery_cost
+        == Decimal("5.00")
+    )
+
+    assert result.episode_results[1].recovered is True
+    assert (
+        result.episode_results[1].decisions[0].action
+        is RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE
+    )
+    assert (
+        result.episode_results[1].recovered_amount
+        == Decimal("500.00")
+    )
+    assert (
+        result.episode_results[1].total_recovery_cost
+        == Decimal("10.00")
+    )
+
+    assert result.batch_evaluation.evaluation_count == 2
+    assert result.batch_evaluation.recovered_count == 2
+    assert (
+        result.batch_evaluation.recovered_amount
+        == Decimal("1000.00")
+    )
+    assert (
+        result.batch_evaluation.total_recovery_cost
+        == Decimal("15.00")
+    )
+    assert (
+        result.batch_evaluation.customer_contact_cost
+        == Decimal("2.00")
+    )
+    assert (
+        result.batch_evaluation.total_economic_cost
+        == Decimal("17.00")
+    )
+    assert (
+        result.batch_evaluation.net_recovery_value
+        == Decimal("983.00")
+    )
+    assert (
+        result.batch_evaluation.recovery_rate
+        == Decimal("1")
+    )
+def test_recovery_episode_removes_attempt_actions_after_maximum_attempts():
+    customer = Customer.create()
+
+    subscription = Subscription.create(
+        customer_id=customer.id,
+        amount=Decimal("100.00"),
+        currency="INR",
+    )
+
+    payment = Payment.create(
+        subscription_id=subscription.id,
+        amount=Decimal("100.00"),
+        currency="INR",
+        status=PaymentStatus.FAILED,
+    )
+
+    state = RecoveryState.create(
+        customer_id=customer.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        subscription_status=subscription.status,
+        payment_status=payment.status,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_attempted_at=payment.attempted_at,
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        failure_code="timeout",
+        available_actions=(
+            RecoveryAction.RETRY_PAYMENT,
+            RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE,
+            RecoveryAction.WAIT,
+        ),
+    )
+
+    scenario = RecoveryScenario(
+        failure_category=PaymentFailureCategory.TRANSIENT,
+        retry_success_probability=Decimal("0.0"),
+        payment_method_update_success_probability=Decimal("0.0"),
+        retry_cost=Decimal("1.00"),
+        payment_method_update_cost=Decimal("2.00"),
+        recovery_message_cost=Decimal("0.50"),
+        customer_contact_cost=Decimal("0.25"),
+        maximum_recovery_attempts=1,
+    )
+
+    class RetryPaymentPolicy(RecoveryPolicy):
+        def choose_action(
+            self,
+            *,
+            state: RecoveryState,
+        ) -> RecoveryAction:
+            return RecoveryAction.RETRY_PAYMENT
+
+    policy = RetryPaymentPolicy()
+
+    environment = RecoveryEnvironment(
+        scenario=scenario,
+        simulator=RecoverySimulator(seed=42),
+    )
+
+    engine = RecoveryEngine(
+        policy=policy,
+        environment=environment,
+    )
+
+    episode = RecoveryEpisode(
+        engine=engine,
+        scenario=scenario,
+        maximum_steps=1,
+    )
+
+    result = episode.run(
+        initial_state=state,
+    )
+
+    assert result.recovered is False
+    assert result.final_state.recovery_attempt_count == 1
+    assert result.final_state.previous_actions == (
+        RecoveryAction.RETRY_PAYMENT,
+    )
+    assert result.final_state.available_actions == (
+        RecoveryAction.WAIT,
+    )

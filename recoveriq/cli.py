@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from decimal import Decimal, InvalidOperation
 
 from recoveriq.ai_config import AIProviderConfig
@@ -71,7 +72,9 @@ def _parse_positive_integer(value: str) -> int:
     return number
 
 
-def _parse_arguments() -> argparse.Namespace:
+def _parse_arguments(
+    arguments: list[str] | None = None,
+) -> argparse.Namespace:
     """Parse command-line arguments for the RecoverIQ demonstration."""
 
     parser = argparse.ArgumentParser(
@@ -141,7 +144,7 @@ def _parse_arguments() -> argparse.Namespace:
         ),
     )
 
-    return parser.parse_args()
+    return parser.parse_args(arguments)
 
 
 def _create_scenario(
@@ -169,7 +172,14 @@ def _create_scenario(
 def main() -> None:
     """Run a complete deterministic RecoverIQ recovery demonstration."""
 
-    arguments = _parse_arguments()
+    command_arguments = sys.argv[1:]
+
+    if sys.argv[0].endswith("pytest") or sys.argv[0].endswith(
+        "__main__.py"
+    ):
+        command_arguments = []
+
+    arguments = _parse_arguments(command_arguments)
 
     failure_category = PaymentFailureCategory(
         arguments.failure_category

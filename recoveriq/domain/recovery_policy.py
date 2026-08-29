@@ -3,6 +3,10 @@ from __future__ import annotations
 from decimal import Decimal
 
 from recoveriq.domain.recovery_action import RecoveryAction
+from recoveriq.domain.recovery_opportunity import RecoveryOpportunity
+from recoveriq.domain.recovery_opportunity_evaluator import (
+    RecoveryOpportunityEvaluator,
+)
 from recoveriq.domain.recovery_policy_interface import RecoveryPolicy
 from recoveriq.domain.recovery_policy_metadata import RecoveryPolicyMetadata
 from recoveriq.domain.recovery_prediction import RecoveryPrediction
@@ -17,10 +21,8 @@ class RecoveryDecisionPolicy(RecoveryPolicy):
     The policy evaluates only actions that are currently available in the
     recovery state.
 
-    For recovery-producing actions, expected value is calculated as:
-
-        expected value =
-            (success probability * recoverable amount) - action cost
+    Recovery opportunities are evaluated separately so that business-value
+    calculations remain outside the policy's action-selection logic.
 
     This policy is intentionally deterministic and explainable. It provides
     the baseline decision-maker that can later be compared with a learned
@@ -32,6 +34,11 @@ class RecoveryDecisionPolicy(RecoveryPolicy):
 
     def __init__(self, *, scenario: RecoveryScenario) -> None:
         self._scenario = scenario
+        self._opportunity_evaluator = (
+            RecoveryOpportunityEvaluator(
+                scenario=scenario,
+            )
+        )
 
     @property
     def metadata(self) -> RecoveryPolicyMetadata:
@@ -52,7 +59,7 @@ class RecoveryDecisionPolicy(RecoveryPolicy):
         """
         Select the highest-value available recovery action.
 
-        If no recovery-producing action has positive expected value,
+        If no recovery-producing action has positive expected net value,
         WAIT is preferred when available.
 
         If WAIT is unavailable, STOP_RECOVERY is selected when available.
@@ -60,16 +67,23 @@ class RecoveryDecisionPolicy(RecoveryPolicy):
         If the state contains no viable action at all, ValueError is raised.
         """
 
-        candidates: list[tuple[Decimal, RecoveryAction]] = []
+        candidates: list[
+            tuple[Decimal, RecoveryAction]
+        ] = []
 
         for action in state.available_actions:
-            expected_value = self._expected_value(
+            opportunity = self._opportunity(
                 state=state,
                 action=action,
             )
 
-            if expected_value > Decimal("0"):
-                candidates.append((expected_value, action))
+            if opportunity.expected_net_value > Decimal("0"):
+                candidates.append(
+                    (
+                        opportunity.expected_net_value,
+                        action,
+                    )
+                )
 
         if candidates:
             candidates.sort(
@@ -103,10 +117,12 @@ class RecoveryDecisionPolicy(RecoveryPolicy):
             state=state,
         )
 
-        expected_value = self._expected_value(
+        opportunity = self._opportunity(
             state=state,
             action=action,
         )
+
+        expected_value = opportunity.expected_net_value
 
         reason = self._decision_reason(
             state=state,
@@ -121,27 +137,20 @@ class RecoveryDecisionPolicy(RecoveryPolicy):
             policy_metadata=self.metadata,
         )
 
-    def _expected_value(
+    def _opportunity(
         self,
         *,
         state: RecoveryState,
         action: RecoveryAction,
-    ) -> Decimal:
-        if action is RecoveryAction.RETRY_PAYMENT:
-            return (
-                self._scenario.retry_success_probability
-                * state.amount
-                - self._scenario.retry_cost
-            )
+    ) -> RecoveryOpportunity:
+        """
+        Evaluate the business opportunity for an available action.
+        """
 
-        if action is RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE:
-            return (
-                self._scenario.payment_method_update_success_probability
-                * state.amount
-                - self._scenario.payment_method_update_cost
-            )
-
-        return Decimal("0")
+        return self._opportunity_evaluator.evaluate(
+            state=state,
+            action=action,
+        )
 
     @staticmethod
     def _action_priority(action: RecoveryAction) -> int:
@@ -172,7 +181,10 @@ class RecoveryDecisionPolicy(RecoveryPolicy):
                 f"positive expected recovery value of {expected_value}."
             )
 
-        if action is RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE:
+        if (
+            action
+            is RecoveryAction.REQUEST_PAYMENT_METHOD_UPDATE
+        ):
             return (
                 "Payment-method update was selected because it has the "
                 f"highest positive expected recovery value of "

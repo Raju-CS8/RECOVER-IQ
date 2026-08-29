@@ -5,37 +5,43 @@ from recoveriq.domain.batch_recovery_evaluation import (
     BatchRecoveryEvaluator,
 )
 from recoveriq.domain.batch_recovery_workflow import (
+    BatchRecoveryEpisodeFactory,
     BatchRecoveryWorkflow,
+    RecoveryEpisodeRunner,
 )
-from recoveriq.domain.recovery_episode import RecoveryEpisode
 from recoveriq.domain.recovery_environment import RecoveryEnvironment
+from recoveriq.domain.recovery_episode import RecoveryEpisode
 from recoveriq.domain.recovery_evaluation import RecoveryEvaluator
 from recoveriq.domain.recovery_scenario import RecoveryScenario
 from recoveriq.domain.recovery_simulator import RecoverySimulator
 from recoveriq.recovery_engine_factory import RecoveryEngineFactory
 
 
-class BatchRecoveryWorkflowFactory:
+class ConfiguredBatchRecoveryEpisodeFactory:
     """
-    Application-level factory for constructing a batch recovery workflow.
+    Creates independently configured recovery episodes for batch items.
 
-    The factory centralizes construction of the shared recovery environment,
-    recovery episode, individual evaluator, and batch evaluator.
+    Each episode receives the scenario and deterministic simulator seed
+    assigned to its specific batch item.
     """
 
-    @staticmethod
-    def create(
+    def __init__(
+        self,
         *,
         config: AIProviderConfig,
+        maximum_steps: int,
+    ) -> None:
+        self._config = config
+        self._maximum_steps = maximum_steps
+
+    def create_episode(
+        self,
+        *,
         scenario: RecoveryScenario,
         simulator_seed: int,
-        maximum_steps: int,
-    ) -> BatchRecoveryWorkflow:
+    ) -> RecoveryEpisodeRunner:
         """
-        Build a fully configured batch recovery workflow.
-
-        The configured recovery episode is reused for every input in the
-        batch while each input retains its own recovery state and scenario.
+        Build a recovery episode for one batch item.
         """
 
         simulator = RecoverySimulator(
@@ -48,20 +54,46 @@ class BatchRecoveryWorkflowFactory:
         )
 
         engine = RecoveryEngineFactory.create(
-            config=config,
+            config=self._config,
             environment=environment,
         )
 
-        episode = RecoveryEpisode(
+        return RecoveryEpisode(
             engine=engine,
-            maximum_steps=maximum_steps,
+            maximum_steps=self._maximum_steps,
         )
 
-        evaluator = RecoveryEvaluator()
-        batch_evaluator = BatchRecoveryEvaluator()
+
+class BatchRecoveryWorkflowFactory:
+    """
+    Application-level factory for constructing batch recovery workflows.
+
+    The factory centralizes configuration shared across the batch while
+    allowing every batch item to receive its own scenario-aware recovery
+    episode.
+    """
+
+    @staticmethod
+    def create(
+        *,
+        config: AIProviderConfig,
+        simulator_seed: int,
+        maximum_steps: int,
+    ) -> BatchRecoveryWorkflow:
+        """
+        Build a fully configured scenario-aware batch recovery workflow.
+        """
+
+        episode_factory: BatchRecoveryEpisodeFactory = (
+            ConfiguredBatchRecoveryEpisodeFactory(
+                config=config,
+                maximum_steps=maximum_steps,
+            )
+        )
 
         return BatchRecoveryWorkflow(
-            episode=episode,
-            evaluator=evaluator,
-            batch_evaluator=batch_evaluator,
+            episode_factory=episode_factory,
+            evaluator=RecoveryEvaluator(),
+            batch_evaluator=BatchRecoveryEvaluator(),
+            simulator_seed=simulator_seed,
         )

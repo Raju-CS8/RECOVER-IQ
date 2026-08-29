@@ -413,3 +413,132 @@ def test_recover_endpoint_accepts_zero_payment_method_probability(
 
     assert data["terminal"] is True
     assert data["recovered"] is False
+def test_batch_recover_endpoint_runs_multiple_recoveries(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AI_PROVIDER",
+        "deterministic",
+    )
+    monkeypatch.setenv(
+        "AI_MODEL",
+        "local",
+    )
+
+    client = TestClient(app)
+
+    response = client.post(
+        "/recover/batch",
+        json={
+            "items": [
+                {
+                    "amount": "500.00",
+                    "failure_category": "transient",
+                },
+                {
+                    "amount": "1000.00",
+                    "failure_category": "transient",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["evaluation_count"] == 2
+    assert data["recovered_count"] == 2
+    assert data["recovered_amount"] == "1500.00"
+    assert data["total_recovery_cost"] == "10.00"
+    assert data["net_recovery_value"] == "1490.00"
+    assert data["recovery_rate"] == "1"
+
+    assert len(data["items"]) == 2
+
+    assert data["items"][0]["recovered"] is True
+    assert data["items"][0]["recovered_amount"] == "500.00"
+    assert data["items"][0]["decision_count"] == 1
+
+    assert data["items"][1]["recovered"] is True
+    assert data["items"][1]["recovered_amount"] == "1000.00"
+    assert data["items"][1]["decision_count"] == 1
+
+
+def test_batch_recover_endpoint_supports_different_failure_categories(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AI_PROVIDER",
+        "deterministic",
+    )
+    monkeypatch.setenv(
+        "AI_MODEL",
+        "local",
+    )
+
+    client = TestClient(app)
+
+    response = client.post(
+        "/recover/batch",
+        json={
+            "items": [
+                {
+                    "amount": "500.00",
+                    "failure_category": "transient",
+                },
+                {
+                    "amount": "750.00",
+                    "failure_category": "payment_method",
+                },
+            ],
+            "payment_method_update_success_probability": "1.0",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["evaluation_count"] == 2
+    assert data["recovered_count"] == 2
+    assert data["recovered_amount"] == "1250.00"
+
+    assert len(data["items"]) == 2
+
+    assert data["items"][0]["recovered"] is True
+    assert data["items"][0]["recovered_amount"] == "500.00"
+
+    assert data["items"][1]["recovered"] is True
+    assert data["items"][1]["recovered_amount"] == "750.00"
+
+
+def test_batch_recover_endpoint_rejects_empty_items() -> None:
+    client = TestClient(app)
+
+    response = client.post(
+        "/recover/batch",
+        json={
+            "items": [],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_batch_recover_endpoint_rejects_invalid_item_amount() -> None:
+    client = TestClient(app)
+
+    response = client.post(
+        "/recover/batch",
+        json={
+            "items": [
+                {
+                    "amount": "0",
+                    "failure_category": "transient",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 422
